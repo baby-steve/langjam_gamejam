@@ -1,0 +1,311 @@
+use std::{collections::hash_map, iter::Peekable, slice::Iter};
+
+use crate::{
+    Error,
+    lexer::{Token, TokenKind},
+    vm::{Instruction, Runtime},
+};
+
+pub fn compile(tokens: Vec<Token>, runtime: &mut Runtime) -> Result<Module, Error> {
+    let mut compiler = Compiler {
+        runtime,
+        // globals: Default::default(),
+        // field_to_id_map: ahash::HashMap::default(),
+        tokens: tokens.iter().peekable(),
+        code: vec![],
+        constants: vec![],
+    };
+
+    while compiler.tokens.peek().is_some() {
+        compiler.compile_statement()?;
+    }
+
+    compiler.code.push(Instruction::Halt);
+
+    Ok(Module {
+        constants: compiler.constants,
+        code: compiler.code,
+    })
+}
+
+#[derive(Debug)]
+pub struct Module {
+    pub code: Vec<Instruction>,
+    pub constants: Vec<f64>,
+}
+
+pub struct Compiler<'s> {
+    runtime: &'s mut Runtime,
+    // globals: HashMap<String, u32>,
+    // field_to_id_map: ahash::HashMap<String, u32>,
+    tokens: Peekable<Iter<'s, Token>>,
+    code: Vec<Instruction>,
+    constants: Vec<f64>,
+}
+
+impl<'s> Compiler<'s> {
+    pub fn consume(&mut self, expected: TokenKind) -> Result<(), Error> {
+        if let Some(token) = self.tokens.next() {
+            if token.kind == expected {
+                Ok(())
+            } else {
+                Err(Error::UnexpectedTokenExpected(token.kind, expected))
+            }
+        } else {
+            Err(Error::UnexpectedEOFExpected(expected))
+        }
+    }
+
+    pub fn compile_statement(&mut self) -> Result<(), Error> {
+        while let Some(token) = self.tokens.peek() {
+            match token.kind {
+                TokenKind::Semicolon => {
+                    self.tokens.next();
+                    continue;
+                }
+
+                TokenKind::Nil
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Number
+                | TokenKind::Ident
+                | TokenKind::String => {
+                    self.compile_member()?;
+                    self.consume(TokenKind::Semicolon)?;
+                    self.code.push(Instruction::Pop);
+                }
+
+                TokenKind::End => {
+                    break;
+                }
+
+                TokenKind::Minus => todo!(),
+                TokenKind::If => self.compile_if_stmt()?,
+                TokenKind::While => self.compile_while_stmt()?,
+
+                _ => {
+                    return Err(Error::UnexpectedToken((*token).clone()));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn compile_while_stmt(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn compile_if_stmt(&mut self) -> Result<(), Error> {
+        // Consume the IF token.
+        // println!("{:?}", self.tokens.next());
+        self.consume(TokenKind::If)?;
+
+        self.compile_member()?;
+
+        self.consume(TokenKind::Then)?;
+
+        let patch = self.code.len();
+        self.code.push(Instruction::JmpIfFalse { addr: 0xdead });
+        self.code.push(Instruction::Pop);
+
+        while let Some(token) = self.tokens.peek() {
+            if token.kind != TokenKind::End {
+                self.compile_statement()?;
+            } else {
+                break;
+            }
+        }
+
+        let end = self.code.len();
+        let offset = end - patch;
+        self.code[patch] = Instruction::JmpIfFalse { addr: offset as _ };
+
+        // TODO: else clause.
+
+        // Consume the END token.
+        self.consume(TokenKind::End)?;
+
+        Ok(())
+    }
+
+    fn compile_member(&mut self) -> Result<(), Error> {
+        self.compile_atom()?;
+
+        while let Some(token) = self.tokens.peek() {
+            if token.kind == TokenKind::Dot {
+                self.tokens.next();
+
+                let Some(next_token) = self.tokens.next() else {
+                    return Err(Error::UnexpectedEOF);
+                };
+
+                if next_token.kind == TokenKind::Ident {
+                    let name = next_token.data.clone();
+
+                    // If the next token is an equal sign, then this becomes a store
+                    // operation. If the next token is a left parentheses, then this becomes
+                    // a method invocation operation.
+                    if let Some(token) = self.tokens.peek() {
+                        match token.kind {
+                            TokenKind::Equal => {
+                                // Emit an `IndexSet` instruction.
+                                // let name = token.data.clone();
+                                self.consume(TokenKind::Equal)?;
+
+                                self.compile_member()?;
+
+                                let id = self.runtime.field_to_id_map.len() as u32;
+                                self.runtime.field_to_id_map.insert(name, id);
+                                self.code.push(Instruction::IndexSet { index: id });
+                            }
+                            TokenKind::LParen => {
+                                let sym = self.runtime.field_to_id_map.len() as u32;
+                                // let sym_name = token.data.clone();
+                                self.runtime.field_to_id_map.insert(name, sym);
+
+                                // Emit an `Invoke` instruction.
+                                self.consume(TokenKind::LParen)?;
+
+                                let mut args = 0u8;
+                                while let Some(token) = self.tokens.peek() {
+                                    if token.kind == TokenKind::RParen {
+                                        break;
+                                    } else {
+                                        args += 1;
+                                        self.compile_member()?;
+
+                                        // Optional trailing comma.
+                                        if let Some(token) = self.tokens.peek() {
+                                            if token.kind == TokenKind::Comma {
+                                                self.consume(TokenKind::Comma)?;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                self.consume(TokenKind::RParen)?;
+
+                                self.code.push(Instruction::Invoke { args, sym });
+                            }
+                            _ => {
+                                let new_id = self.runtime.field_to_id_map.len() as u32;
+                                let id = match self.runtime.field_to_id_map.entry(name) {
+                                    hash_map::Entry::Occupied(occupied_entry) => {
+                                        *occupied_entry.get()
+                                    }
+                                    hash_map::Entry::Vacant(vacant_entry) => {
+                                        vacant_entry.insert(new_id);
+                                        new_id
+                                    }
+                                };
+
+                                self.code.push(Instruction::IndexGet { index: id });
+
+                                continue;
+                            }
+                        }
+                    }
+                } else {
+                    return Err(Error::UnexpectedToken(next_token.clone()));
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn compile_atom(&mut self) -> Result<(), Error> {
+        // Consume the current token and compile it.
+        if let Some(token) = self.tokens.next() {
+            match token.kind {
+                TokenKind::Ident => {
+                    // If this identifier is immediately followed by an equal sign, then we
+                    // this becomes a store operation instead of a load operation.
+                    if let Some(next_token) = self.tokens.peek() {
+                        if next_token.kind == TokenKind::Equal {
+                            let name = token.data.clone();
+                            self.consume(TokenKind::Equal)?;
+
+                            // Compile the left hand side of the assignment.
+                            self.compile_member()?;
+
+                            let id = self.runtime.get_global_index(&name) as u32;
+                            self.code.push(Instruction::Store { index: id });
+
+                            return Ok(());
+                        }
+                    }
+
+                    let id = self.runtime.get_global_index(&token.data) as u32;
+                    self.code.push(Instruction::Load { index: id });
+
+                    if let Some(token) = self.tokens.peek() {
+                        if token.kind == TokenKind::LParen {
+                            //let sym = self.field_to_id_map.len() as u32;
+                            //   let sym_name = token.data.clone();
+                            //self.field_to_id_map.insert(sym_name, sym);
+
+                            // Emit an `Invoke` instruction.
+                            self.consume(TokenKind::LParen)?;
+
+                            let mut args = 0u8;
+                            while let Some(token) = self.tokens.peek() {
+                                if token.kind == TokenKind::RParen {
+                                    break;
+                                } else {
+                                    args += 1;
+                                    self.compile_member()?;
+
+                                    // Optional trailing comma.
+                                    if let Some(token) = self.tokens.peek() {
+                                        if token.kind == TokenKind::Comma {
+                                            self.consume(TokenKind::Comma)?;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            self.consume(TokenKind::RParen)?;
+
+                            self.code.push(Instruction::Call { args });
+                        }
+                    }
+                }
+                TokenKind::String => {
+                    let value = token.data.clone();
+                    let index = self.runtime.interner.intern(value);
+                    self.code.push(Instruction::LoadString { index });
+                }
+                TokenKind::Number => {
+                    let num = token.data.parse::<f64>().expect("bug: bad float");
+                    let idx = self.constants.len();
+                    debug_assert!(idx < u32::MAX as usize, "bug: too many constants");
+                    self.constants.push(num);
+                    self.code.push(Instruction::LoadConst { index: idx as u32 });
+                }
+                TokenKind::True => {
+                    self.code.push(Instruction::LoadTrue);
+                }
+                TokenKind::False => {
+                    self.code.push(Instruction::LoadFalse);
+                }
+                TokenKind::Nil => {
+                    self.code.push(Instruction::LoadNil);
+                }
+                TokenKind::Alloc => {
+                    self.code.push(Instruction::Alloc);
+                }
+                _ => return Err(Error::UnexpectedToken(token.clone())),
+            }
+        }
+
+        Ok(())
+    }
+}
