@@ -75,7 +75,7 @@ impl<'s> Compiler<'s> {
                     self.code.push(Instruction::Pop);
                 }
 
-                TokenKind::End => {
+                TokenKind::End | TokenKind::Else | TokenKind::ElseIf => {
                     break;
                 }
 
@@ -93,6 +93,34 @@ impl<'s> Compiler<'s> {
     }
 
     fn compile_while_stmt(&mut self) -> Result<(), Error> {
+        self.consume(TokenKind::While)?;
+
+        let start = self.code.len();
+        self.compile_member()?;
+
+        let jump = self.code.len();
+        self.code.push(Instruction::JmpIfFalse { addr: 0xdead });
+
+        self.consume(TokenKind::Do)?;
+
+        while let Some(token) = self.tokens.peek() {
+            if token.kind != TokenKind::End {
+                self.compile_statement()?;
+            } else {
+                break;
+            }
+        }
+
+        self.consume(TokenKind::End)?;
+
+        let end = self.code.len();
+        self.code.push(Instruction::Jmp {
+            addr: start as i32 - end as i32 - 1,
+        });
+        self.code[jump] = Instruction::JmpIfFalse {
+            addr: (end - jump) as i32,
+        };
+
         Ok(())
     }
 
@@ -105,26 +133,103 @@ impl<'s> Compiler<'s> {
 
         self.consume(TokenKind::Then)?;
 
-        let patch = self.code.len();
+        // Position of last jump instruction emitted by compiler.
+        let mut last_jmp_inst = self.code.len();
         self.code.push(Instruction::JmpIfFalse { addr: 0xdead });
-        self.code.push(Instruction::Pop);
+        let mut has_else = false;
+        // self.code.push(Instruction::Pop); // Pop the condition off the stack.
+
+        /*
+        // if
+        <Cond>
+        JmpIfFalse --+      set prev_branch
+        <Pop>        |
+        <Stmt>       |
+        <...>        |
+        Jmp ---------|-+    store in `jumps`
+        <Cond> <-----+ |
+        // elseif      |
+        JmpIfFalse --+ |    set prev_branch
+        <Pop>        | |
+        <Stmt>       | |
+        <...>        | |
+        Jmp ---------|-|-+  store in `jumps`
+        // else      | | |
+        <Stmt> <-----+ | |
+        <Stmt>         | |
+        <END>  <-------+-+
+         */
+
+        // Absolute jumps that need to be patched.
+        let mut jumps: Vec<usize> = vec![];
 
         while let Some(token) = self.tokens.peek() {
-            if token.kind != TokenKind::End {
-                self.compile_statement()?;
-            } else {
+            // TODO: get ELSE and ELSEIF's working.
+            if token.kind == TokenKind::Else {
+                self.consume(TokenKind::Else)?;
+
+                let jump_inst = self.code.len();
+                jumps.push(jump_inst);
+                self.code.push(Instruction::Jmp { addr: 0xdead_b0b }); // In honor of Bob Nystrom.
+
+                // Update the last jump instruction so that it jumps to this branch.
+                self.code[last_jmp_inst] = Instruction::JmpIfFalse {
+                    addr: (jump_inst - last_jmp_inst) as i32,
+                };
+
+                has_else = true;
+            } else if token.kind == TokenKind::ElseIf {
+                // Consume the ELSEIF token.
+                self.consume(TokenKind::ElseIf)?;
+
+                // Emit an unconditional jump instruction for the previous branch to take.
+                let jump_inst = self.code.len();
+                // This instruction will need to be updated after we compile all clauses so
+                // we store it for later.
+                jumps.push(jump_inst);
+                // Emit a placeholder instruction that will be updated later.
+                self.code.push(Instruction::Jmp { addr: 0xdead_b0b }); // In honor of Bob Nystrom.
+
+                // Update the last jump instruction so that it jumps to this branch.
+                self.code[last_jmp_inst] = Instruction::JmpIfFalse {
+                    addr: (jump_inst - last_jmp_inst) as i32,
+                };
+
+                // Compile the branch condition.
+                self.compile_member()?;
+
+                last_jmp_inst = self.code.len();
+                // Emit the instruction to skip this block and go to the next.
+                self.code.push(Instruction::JmpIfFalse { addr: 0xdead_b0b });
+                // Emit instruction to pop condition value off of stack.
+                // self.code.push(Instruction::Pop);
+
+                self.consume(TokenKind::Then)?;
+            } else if token.kind == TokenKind::End {
+                self.consume(TokenKind::End)?;
                 break;
+            } else {
+                self.compile_statement()?;
             }
         }
 
-        let end = self.code.len();
-        let offset = end - patch;
-        self.code[patch] = Instruction::JmpIfFalse { addr: offset as _ };
+        let last = self.code.len() as i32;
 
-        // TODO: else clause.
+        if !has_else {
+            // Update the last jump instruction so that it jumps to this branch.
+            self.code[last_jmp_inst] = Instruction::JmpIfFalse {
+                addr: last - last_jmp_inst as i32 - 1,
+            };
+        }
 
-        // Consume the END token.
-        self.consume(TokenKind::End)?;
+        let last = self.code.len() as i32;
+
+        println!("{jumps:?}");
+
+        for jump in jumps {
+            let addr = last - jump as i32 - 1;
+            self.code[jump] = Instruction::Jmp { addr };
+        }
 
         Ok(())
     }

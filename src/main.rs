@@ -36,7 +36,6 @@ fn main() -> Result<(), Error> {
                 Some(obj) => println!("{obj:?}"),
                 None => println!("Object {{ <oops.__{idx}> }}"),
             },
-            Value::Free(_) => todo!(),
         }
 
         Value::Nil
@@ -174,22 +173,52 @@ fn main() -> Result<(), Error> {
     simple_math!("is_nan" => is_nan => bool);
     simple_math!("is_normal" => is_normal => bool);
 
-    runtime.register_function("len", 1, |args| {
-        match args.stack.pop().unwrap() {
-            Value::String(addr) => {
-                let str = args.strings.get(addr);
-                Value::Number(str.len() as f64)
-            }
-            Value::Object(addr) => {
-                let obj = args.heap.get(addr);
-                if let Some(obj) = obj {
-                    Value::Number(obj.data.len() as f64)
-                } else {
-                    todo!("real errors. This is a segfault");
-                }
-            }
-            v => panic!("Expected string or object, got {:?}", v),
+    runtime.register_function("len", 1, |args| match args.stack.pop().unwrap() {
+        Value::String(addr) => {
+            let str = args.strings.get(addr);
+            Value::Number(str.len() as f64)
         }
+        Value::Object(addr) => {
+            let obj = args.heap.get(addr);
+            if let Some(obj) = obj {
+                Value::Number(obj.data.len() as f64)
+            } else {
+                todo!("real errors. This is a segfault");
+            }
+        }
+        v => panic!("Expected string or object, got {:?}", v),
+    });
+
+    // ===============================================================================
+    // SDL related functions.
+    // ===============================================================================
+    runtime.register_function("window", 3, |args| {
+        let Value::Number(height) = args.stack.pop().unwrap() else {
+            todo!("Not a number");
+        };
+
+        let Value::Number(width) = args.stack.pop().unwrap() else {
+            todo!("Not a number");
+        };
+
+        let Value::String(title_addr) = args.stack.pop().unwrap() else {
+            todo!("Not a string");
+        };
+
+        let title = args.strings.get(title_addr);
+        let window_res = args
+            .sdl
+            .video_subsystem
+            .window(&title, width as u32, height as u32)
+            .position_centered()
+            .build();
+
+        match window_res {
+            Ok(window) => *args.sdl.window = Some(window),
+            Err(_) => todo!("Failed to create window (need real errors)"),
+        }
+
+        Value::Nil
     });
 
     let args: Vec<String> = env::args().collect();
@@ -231,7 +260,11 @@ fn run(src: String, runtime: &mut Runtime) -> Result<(), Error> {
     // }
 
     let module = compiler::compile(tokens, runtime)?;
-    // println!("{module:#?}");
+    println!("=== MODULE ===");
+    for (addr, inst) in module.code.iter().enumerate() {
+        println!("{addr:<10}   {inst:?}");
+    }
+    println!("");
 
     let mut vm = runtime.spawn_vm(&module);
 

@@ -49,7 +49,6 @@ pub enum Value {
     String(u32),
     FunctionPtr(u32),
     Object(u32),
-    Free(u32),
 }
 
 #[derive(Debug)]
@@ -69,6 +68,15 @@ pub struct FunctionArgs<'r> {
     pub stack: &'r mut Vec<Value>,
     pub heap: &'r mut Heap,
     pub strings: &'r mut Interner,
+    pub sdl: &'r mut SdlArgs<'r>,
+}
+
+pub struct SdlArgs<'r> {
+    pub sdl: &'r sdl2::Sdl,
+    pub video_subsystem: &'r sdl2::VideoSubsystem,
+    pub event_pump: &'r mut Option<sdl2::EventPump>,
+    pub window: &'r mut Option<sdl2::video::Window>,
+    pub canvas: &'r mut Option<sdl2::render::Canvas<sdl2::video::Window>>,
 }
 
 pub struct Runtime {
@@ -80,6 +88,12 @@ pub struct Runtime {
     ip: usize,
     pub heap: Heap,
     pub interner: Interner,
+    pub sdl2: sdl2::Sdl,
+    pub video_subsystem: sdl2::VideoSubsystem,
+    pub event_pump: Option<sdl2::EventPump>,
+    // TODO: group window and canvas together.
+    pub window: Option<sdl2::video::Window>,
+    pub canvas: Option<sdl2::render::Canvas<sdl2::video::Window>>,
 }
 
 #[derive(Default)]
@@ -165,6 +179,9 @@ impl Runtime {
 
 impl Runtime {
     pub fn new() -> Self {
+        let sdl = sdl2::init().expect("bug: failed to initialize SDL");
+        let video_subsystem = sdl.video().expect("bug: failed to initialize video");
+
         Self {
             globals: vec![],
             global_name_map: Default::default(),
@@ -174,6 +191,11 @@ impl Runtime {
             stack: vec![],
             ip: 0,
             heap: Heap::new(20),
+            sdl2: sdl,
+            video_subsystem,
+            window: None,
+            event_pump: None,
+            canvas: None,
         }
     }
 }
@@ -327,7 +349,7 @@ impl<'a> Vm<'a> {
                     None => {
                         // Repeat this instruction on the next step.
                         self.vm.ip -= 1;
-                        return ControlFlow::RequestGC
+                        return ControlFlow::RequestGC;
                     }
                 }
             }
@@ -335,11 +357,21 @@ impl<'a> Vm<'a> {
                 let func_offset = self.vm.stack.len() - (args as usize + 1);
                 let func_ptr = self.vm.stack[func_offset];
                 if let Value::FunctionPtr(ptr) = func_ptr {
+                    let mut sdl_args = SdlArgs {
+                        sdl: &mut self.vm.sdl2,
+                        video_subsystem: &mut self.vm.video_subsystem,
+                        event_pump: &mut self.vm.event_pump,
+                        window: &mut self.vm.window,
+                        canvas: &mut self.vm.canvas,
+                    };
+
                     let func_args = FunctionArgs {
                         stack: &mut self.vm.stack,
                         heap: &mut self.vm.heap,
                         strings: &mut self.vm.interner,
+                        sdl: &mut sdl_args,
                     };
+
                     let def = &self.vm.functions[ptr as usize];
 
                     if def.args != args {
@@ -367,9 +399,29 @@ impl<'a> Vm<'a> {
                 // TODO: dispatch methods.
                 // Hrm...
             }
-            Instruction::Jmp { addr } => todo!(),
-            Instruction::JmpIfTrue { addr } => todo!(),
-            Instruction::JmpIfFalse { addr } => todo!(),
+            Instruction::Jmp { addr } => {
+                self.vm.ip = self.vm.ip.saturating_add_signed(addr as isize);
+            }
+            Instruction::JmpIfTrue { addr } => {
+                if let Some(value) = self.vm.stack.pop() {
+                    match value {
+                        Value::Bool(true) => {
+                            self.vm.ip = self.vm.ip.saturating_add_signed(addr as isize)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Instruction::JmpIfFalse { addr } => {
+                if let Some(value) = self.vm.stack.pop() {
+                    match value {
+                        Value::Bool(false) | Value::Nil => {
+                            self.vm.ip = self.vm.ip.saturating_add_signed(addr as isize);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Instruction::Pop => {
                 self.vm.stack.pop();
             }
