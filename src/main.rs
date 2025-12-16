@@ -1,4 +1,4 @@
-use std::{env, io::Write};
+use std::{env, io::Write, time::Duration};
 
 use crate::{
     lexer::{Token, TokenKind},
@@ -8,6 +8,7 @@ use crate::{
 mod compiler;
 mod lexer;
 mod vm;
+mod sdl;
 
 #[derive(Debug)]
 pub enum Error {
@@ -35,6 +36,10 @@ fn main() -> Result<(), Error> {
             Value::Object(idx) => match args.heap.get(idx) {
                 Some(obj) => println!("{obj:?}"),
                 None => println!("Object {{ <oops.__{idx}> }}"),
+            },
+            Value::ExternObject(addr) => match args.heap.get_extern(addr) {
+                Some(obj) => println!("{obj:?}"),
+                None => println!("ExternObject {{ <oops.__{addr}> }}"),
             },
         }
 
@@ -103,6 +108,38 @@ fn main() -> Result<(), Error> {
     bin_op_func!("div" => /);
     bin_op_func!("mul" => *);
     bin_op_func!("mod" => %);
+
+    runtime.register_function("eq", 2, |args| {
+        let b = args.stack.pop().unwrap();
+        let a = args.stack.pop().unwrap();
+
+        match (a, b) {
+            (Value::Nil, Value::Nil) => Value::Bool(true),
+            (Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
+            (Value::Number(a), Value::Number(b)) => Value::Bool(a == b),
+            (Value::String(a), Value::String(b)) => Value::Bool(a == b),
+            (Value::FunctionPtr(a), Value::FunctionPtr(b)) => Value::Bool(a == b),
+            (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
+            (Value::ExternObject(a), Value::ExternObject(b)) => Value::Bool(a == b),
+            _ => Value::Bool(false)
+        }
+    });
+
+    runtime.register_function("neq", 2, |args| {
+        let b = args.stack.pop().unwrap();
+        let a = args.stack.pop().unwrap();
+
+        match (a, b) {
+            (Value::Nil, Value::Nil) => Value::Bool(false),
+            (Value::Bool(a), Value::Bool(b)) => Value::Bool(a != b),
+            (Value::Number(a), Value::Number(b)) => Value::Bool(a != b),
+            (Value::String(a), Value::String(b)) => Value::Bool(a != b),
+            (Value::FunctionPtr(a), Value::FunctionPtr(b)) => Value::Bool(a != b),
+            (Value::Object(a), Value::Object(b)) => Value::Bool(a != b),
+            (Value::ExternObject(a), Value::ExternObject(b)) => Value::Bool(a != b),
+            _ => Value::Bool(true)
+        }
+    });
 
     macro_rules! cmp_op_func {
         ($name:expr => $op:tt) => {
@@ -189,37 +226,13 @@ fn main() -> Result<(), Error> {
         v => panic!("Expected string or object, got {:?}", v),
     });
 
-    // ===============================================================================
-    // SDL related functions.
-    // ===============================================================================
-    runtime.register_function("window", 3, |args| {
-        let Value::Number(height) = args.stack.pop().unwrap() else {
-            todo!("Not a number");
-        };
-
-        let Value::Number(width) = args.stack.pop().unwrap() else {
-            todo!("Not a number");
-        };
-
-        let Value::String(title_addr) = args.stack.pop().unwrap() else {
-            todo!("Not a string");
-        };
-
-        let title = args.strings.get(title_addr);
-        let window_res = args
-            .sdl
-            .video_subsystem
-            .window(&title, width as u32, height as u32)
-            .position_centered()
-            .build();
-
-        match window_res {
-            Ok(window) => *args.sdl.window = Some(window),
-            Err(_) => todo!("Failed to create window (need real errors)"),
-        }
-
+    runtime.register_function("sleep", 1, |args| {
+        let duration = args.stack.pop().unwrap().as_number();
+        std::thread::sleep(Duration::from_secs_f64(duration));
         Value::Nil
     });
+
+    sdl::register_sdl_functions(&mut runtime);
 
     let args: Vec<String> = env::args().collect();
     if let Some(path) = args.get(1) {
@@ -260,11 +273,11 @@ fn run(src: String, runtime: &mut Runtime) -> Result<(), Error> {
     // }
 
     let module = compiler::compile(tokens, runtime)?;
-    println!("=== MODULE ===");
-    for (addr, inst) in module.code.iter().enumerate() {
-        println!("{addr:<10}   {inst:?}");
-    }
-    println!("");
+    // println!("=== MODULE ===");
+    // for (addr, inst) in module.code.iter().enumerate() {
+    //     println!("{addr:<10}   {inst:?}");
+    // }
+    // println!("");
 
     let mut vm = runtime.spawn_vm(&module);
 
