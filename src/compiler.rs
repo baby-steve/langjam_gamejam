@@ -224,7 +224,7 @@ impl<'s> Compiler<'s> {
 
         let last = self.code.len() as i32;
 
-        println!("{jumps:?}");
+        // println!("{jumps:?}");
 
         for jump in jumps {
             let addr = last - jump as i32 - 1;
@@ -384,8 +384,9 @@ impl<'s> Compiler<'s> {
                     }
                 }
                 TokenKind::String => {
-                    let value = token.data.clone();
-                    let index = self.runtime.interner.intern(value);
+                    let len = token.data.len();
+                    let value = &token.data.clone()[1..len-1];
+                    let index = self.runtime.interner.intern(value.to_string());
                     self.code.push(Instruction::LoadString { index });
                 }
                 TokenKind::Number => {
