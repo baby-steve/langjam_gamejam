@@ -1,4 +1,4 @@
-use std::{collections::hash_map, iter::Peekable, slice::Iter};
+use std::{iter::Peekable, slice::Iter};
 
 use crate::{
     Error,
@@ -260,14 +260,11 @@ impl<'s> Compiler<'s> {
 
                                 self.compile_member()?;
 
-                                let id = self.runtime.field_to_id_map.len() as u32;
-                                self.runtime.field_to_id_map.insert(name, id);
+                                let id = self.runtime.get_field_index(&name);
                                 self.code.push(Instruction::IndexSet { index: id });
                             }
                             TokenKind::LParen => {
-                                let sym = self.runtime.field_to_id_map.len() as u32;
-                                // let sym_name = token.data.clone();
-                                self.runtime.field_to_id_map.insert(name, sym);
+                                let sym = self.runtime.get_field_index(&name);
 
                                 // Emit an `Invoke` instruction.
                                 self.consume(TokenKind::LParen)?;
@@ -296,17 +293,7 @@ impl<'s> Compiler<'s> {
                                 self.code.push(Instruction::Invoke { args, sym });
                             }
                             _ => {
-                                let new_id = self.runtime.field_to_id_map.len() as u32;
-                                let id = match self.runtime.field_to_id_map.entry(name) {
-                                    hash_map::Entry::Occupied(occupied_entry) => {
-                                        *occupied_entry.get()
-                                    }
-                                    hash_map::Entry::Vacant(vacant_entry) => {
-                                        vacant_entry.insert(new_id);
-                                        new_id
-                                    }
-                                };
-
+                                let id = self.runtime.get_field_index(&name);
                                 self.code.push(Instruction::IndexGet { index: id });
 
                                 continue;
@@ -385,7 +372,7 @@ impl<'s> Compiler<'s> {
                 }
                 TokenKind::String => {
                     let len = token.data.len();
-                    let value = &token.data.clone()[1..len-1];
+                    let value = &token.data.clone()[1..len - 1];
                     let index = self.runtime.interner.intern(value.to_string());
                     self.code.push(Instruction::LoadString { index });
                 }
