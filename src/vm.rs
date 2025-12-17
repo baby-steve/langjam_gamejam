@@ -179,10 +179,10 @@ impl<'r> FunctionArgs<'r> {
 pub struct Runtime {
     globals: Vec<Value>,
     global_name_map: HashMap<String, usize>,
-    pub field_to_id_map: ahash::HashMap<String, u32>,
+    field_to_id_map: ahash::HashMap<String, u32>,
     functions: Vec<FunctionDef>,
     stack: Vec<Value>,
-    ip: usize,
+    pub ip: usize,
     pub heap: Heap,
     pub interner: Interner,
 }
@@ -241,6 +241,52 @@ impl Runtime {
                 self.globals.push(Value::Nil);
                 self.global_name_map.insert(name.to_string(), index);
                 index
+            }
+        }
+    }
+
+    pub fn get_global(&self, name: &str) -> Option<Value> {
+        self.global_name_map.get(name).map(|i| self.globals[*i])
+    }
+
+    pub fn format_value(&self, value: Value) -> String {
+        match value {
+            Value::Nil => "nil".into(),
+            Value::Bool(bool) => bool.to_string(),
+            Value::Number(num) => num.to_string(),
+            Value::String(addr) => self.interner.get(addr).clone(),
+            Value::FunctionPtr(addr) => format!("fn<{addr}>"),
+            Value::Object(idx) => match self.heap.get(idx) {
+                Some(obj) => format!("{obj:?}"),
+                None => format!("Object {{ <oops.__{idx}> }}"),
+            },
+            Value::ExternObject(addr) => match self.heap.get_extern(addr) {
+                Some(obj) => format!("{obj:?}"),
+                None => format!("ExternObject {{ <oops.__{addr}> }}"),
+            },
+        }
+    }
+
+    pub fn globals(&self) -> impl Iterator<Item = (&str, Value)> {
+        self.global_name_map.iter().map(|(key, idx)| {
+            let value = self.globals[*idx];
+            (key.as_str(), value)
+        })
+    }
+
+    pub fn field_ids(&self) -> impl Iterator<Item = (&str, u32)> {
+        self.field_to_id_map
+            .iter()
+            .map(|(name, addr)| (name.as_str(), *addr))
+    }
+
+    pub fn get_field_index(&mut self, name: &str) -> u32 {
+        match self.field_to_id_map.get(name) {
+            Some(idx) => *idx,
+            None => {
+                let new_id = self.field_to_id_map.len() as u32;
+                self.field_to_id_map.insert(name.to_string(), new_id);
+                new_id
             }
         }
     }

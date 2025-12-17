@@ -7,8 +7,8 @@ use crate::{
 
 mod compiler;
 mod lexer;
-mod vm;
 mod sdl;
+mod vm;
 
 #[derive(Debug)]
 pub enum Error {
@@ -121,7 +121,7 @@ fn main() -> Result<(), Error> {
             (Value::FunctionPtr(a), Value::FunctionPtr(b)) => Value::Bool(a == b),
             (Value::Object(a), Value::Object(b)) => Value::Bool(a == b),
             (Value::ExternObject(a), Value::ExternObject(b)) => Value::Bool(a == b),
-            _ => Value::Bool(false)
+            _ => Value::Bool(false),
         }
     });
 
@@ -137,7 +137,7 @@ fn main() -> Result<(), Error> {
             (Value::FunctionPtr(a), Value::FunctionPtr(b)) => Value::Bool(a != b),
             (Value::Object(a), Value::Object(b)) => Value::Bool(a != b),
             (Value::ExternObject(a), Value::ExternObject(b)) => Value::Bool(a != b),
-            _ => Value::Bool(true)
+            _ => Value::Bool(true),
         }
     });
 
@@ -234,6 +234,13 @@ fn main() -> Result<(), Error> {
 
     sdl::register_sdl_functions(&mut runtime);
 
+    pub enum Mode {
+        Normal,
+        Debug,
+    }
+
+    let mut mode = Mode::Normal;
+
     let args: Vec<String> = env::args().collect();
     if let Some(path) = args.get(1) {
         let src = std::fs::read_to_string(path).expect("error reading file");
@@ -246,17 +253,115 @@ fn main() -> Result<(), Error> {
         std::io::stdout().flush().unwrap();
 
         let stdin = std::io::stdin();
+        let mut module = None;
+        let mut vm_halted = true;
 
         for line in stdin.lines() {
             let line = line.unwrap();
-            if line == ":exit" {
-                // Exit
-                println!("bye!");
-                break;
-            } else {
-                run(line, &mut runtime)?;
-            }
+            match mode {
+                Mode::Normal => match line.as_str() {
+                    ":exit" => {
+                        println!("k bye!");
+                        break;
+                    }
+                    ":debug" => {
+                        mode = Mode::Debug;
+                    }
+                    ":normal" => {
+                        mode = Mode::Normal;
+                    }
+                    _ => match mode {
+                        Mode::Normal => run(line, &mut runtime)?,
+                        Mode::Debug => {}
+                    },
+                },
+                Mode::Debug => match line.as_str() {
+                    ":exit" => {
+                        println!("k bye!");
+                        break;
+                    }
+                    ":debug" => {
+                        mode = Mode::Debug;
+                    }
+                    ":normal" => {
+                        mode = Mode::Normal;
+                    }
+                    l @ ":step" | l @ "" => {
+                        let Some(module) = &module else {
+                            if l == ":step" {
+                                println!("Please load a file first");
+                            }
+                            continue;
+                        };
 
+                        if vm_halted {
+                            println!("VM halted");
+                            continue;
+                        }
+
+                        let mut vm = runtime.spawn_vm(module);
+
+                        println!("{:<10}{:?}", vm.vm.ip, vm.module.code[vm.vm.ip]);
+
+                        match vm.step() {
+                            vm::ControlFlow::RequestGC => {
+                                println!("GC requested");
+                                vm_halted = true;
+                            }
+                            vm::ControlFlow::Continue => {}
+                            vm::ControlFlow::Halt => vm_halted = true,
+                        }
+                    }
+                    l if l.starts_with(":load") => {
+                        let Some(path) = l.split(" ").nth(1) else {
+                            println!("Pease provide a path");
+                            continue;
+                        };
+
+                        let src = match std::fs::read_to_string(path) {
+                            Ok(src) => src,
+                            Err(err) => {
+                                println!("Error reading file: {:?}", err);
+                                continue;
+                            }
+                        };
+
+                        let tokens = lexer::lex(&src)?;
+                        let new_module = compiler::compile(tokens, &mut runtime)?;
+                        println!("=== {path} ===");
+                        for (addr, inst) in new_module.code.iter().enumerate() {
+                            println!("{addr:<10}   {inst:?}");
+                        }
+
+                        module = Some(new_module);
+                        vm_halted = false;
+                    }
+                    l if l.starts_with(":get") => {
+                        let Some(name) = l.split(" ").nth(1) else {
+                            println!("Please provide a variable name");
+                            continue;
+                        };
+
+                        match runtime.get_global(name) {
+                            Some(value) => println!("{}", runtime.format_value(value)),
+                            None => println!("Missing variable {name}"),
+                        }
+                    }
+                    ":globals" => {
+                        for (name, value) in runtime.globals() {
+                            println!("{name:<24}:{}", runtime.format_value(value));
+                        }
+                    }
+                    ":fields" => {
+                        for (name, id) in runtime.field_ids() {
+                            println!("{name:<20} -> {id}");
+                        }
+                    }
+                    _ => println!("Please enter a valid command"),
+                },
+            }
+            
+            // Reset line start.
             print!("> ");
             std::io::stdout().flush().unwrap();
         }
@@ -273,11 +378,11 @@ fn run(src: String, runtime: &mut Runtime) -> Result<(), Error> {
     // }
 
     let module = compiler::compile(tokens, runtime)?;
-    // println!("=== MODULE ===");
-    // for (addr, inst) in module.code.iter().enumerate() {
-    //     println!("{addr:<10}   {inst:?}");
-    // }
-    // println!("");
+    println!("=== MODULE ===");
+    for (addr, inst) in module.code.iter().enumerate() {
+        println!("{addr:<10}{inst:?}");
+    }
+    println!("");
 
     let mut vm = runtime.spawn_vm(&module);
 
