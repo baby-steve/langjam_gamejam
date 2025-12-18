@@ -1,4 +1,4 @@
-use sdl2::{event::Event, rect::{FRect, Rect}};
+use sdl2::{event::Event, rect::FRect};
 
 use crate::vm::{Runtime, Value};
 
@@ -98,7 +98,10 @@ pub fn register_sdl_functions(runtime: &mut Runtime) {
 
     // Event pump functions.
     runtime.register_function("poll_event", 1, |mut args| {
-        let event_pump = match args.stack.pop().unwrap() {
+        println!("Calling poll_event");
+
+        let value = args.stack.pop().unwrap();
+        let event_pump = match value {
             Value::ExternObject(addr) => {
                 let obj = args.heap.get_extern_mut(addr).unwrap();
                 obj.try_borrow_mut::<sdl2::EventPump>().unwrap()
@@ -111,15 +114,19 @@ pub fn register_sdl_functions(runtime: &mut Runtime) {
         };
 
         match event {
-            Event::KeyUp {
-                keycode,
-                ..
-            } => {
-                let object_addr = args.heap.alloc().expect("need GC");
-                
+            Event::KeyUp { keycode, .. } => {
+                let Some(object_addr) = args.heap.alloc() else {
+                    // Out of memory. Trigger a garbage collection cycle.
+                    *args.needs_gc = true;
+                    // Restore the stack's pre-call state to prevent bad things from
+                    // happening when this function gets called again.
+                    args.stack.push(value);
+                    return Value::Nil;
+                };
+
                 let kind_id = args.field_id("kind");
                 let kind_value = args.strings.intern("keyup".into());
-                
+
                 let keycode_id = args.field_id("keycode");
                 let keycode_value = args.strings.intern(keycode.unwrap().to_string());
 
@@ -127,7 +134,7 @@ pub fn register_sdl_functions(runtime: &mut Runtime) {
                 object.data.insert(kind_id, Value::String(kind_value));
                 object.data.insert(keycode_id, Value::String(keycode_value));
 
-                return Value::Object(object_addr)
+                return Value::Object(object_addr);
             }
 
             // Ignore unsupported events.
@@ -174,10 +181,10 @@ pub fn register_sdl_functions(runtime: &mut Runtime) {
     });
 
     runtime.register_function("fill_rect", 5, |args| {
-        let h = args.stack.pop().unwrap().as_number() as u32;
-        let w = args.stack.pop().unwrap().as_number() as u32;
-        let y = args.stack.pop().unwrap().as_number() as i32;
-        let x = args.stack.pop().unwrap().as_number() as i32;
+        let h = args.stack.pop().unwrap().as_number() as f32;
+        let w = args.stack.pop().unwrap().as_number() as f32;
+        let y = args.stack.pop().unwrap().as_number() as f32;
+        let x = args.stack.pop().unwrap().as_number() as f32;
         let canvas = match args.stack.pop().unwrap() {
             Value::ExternObject(addr) => {
                 let obj = args.heap.get_extern_mut(addr).unwrap();
@@ -187,7 +194,7 @@ pub fn register_sdl_functions(runtime: &mut Runtime) {
             _ => todo!("expected external object"),
         };
 
-        canvas.fill_rect(Rect::new(x, y, w, h)).unwrap();
+        canvas.fill_frect(FRect::new(x, y, w, h)).unwrap();
 
         Value::Nil
     });

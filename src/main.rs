@@ -1,14 +1,14 @@
 use std::{env, io::Write, time::Duration};
 
 use crate::{
-    lexer::{Token, TokenKind},
-    vm::{Runtime, Value},
+    gc::gc_app, lexer::{Token, TokenKind}, vm::{Runtime, Value}
 };
 
 mod compiler;
 mod lexer;
 mod sdl;
 mod vm;
+mod gc;
 
 #[derive(Debug)]
 pub enum Error {
@@ -393,12 +393,7 @@ fn run(src: String, runtime: &mut Runtime) -> Result<(), Error> {
             vm::ControlFlow::RequestGC => {
                 println!("Garbage collection triggered");
 
-                // For now, randomly remove an object.
-                vm.vm.heap.free(0);
-                vm.vm.heap.free(1);
-                vm.vm.heap.free(2);
-                vm.vm.heap.free(3);
-                vm.vm.heap.free(4);
+                gc_app(vm.vm);
             }
         }
     }

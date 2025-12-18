@@ -1,6 +1,12 @@
-use std::{any::TypeId, collections::HashMap, ptr::NonNull, vec};
+use std::{
+    any::TypeId,
+    collections::{HashMap, hash_map::Iter},
+    marker::PhantomData,
+    ptr::NonNull,
+    vec,
+};
 
-use crate::compiler::Module;
+use crate::{compiler::Module, gc::GcMetrics};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Instruction {
@@ -80,6 +86,25 @@ impl Value {
             _ => panic!("Type error: not a number"),
         }
     }
+
+    pub fn try_as_extern(&self) -> Option<u32> {
+        match self {
+            Value::ExternObject(addr) => Some(*addr),
+            _ => None,
+        }
+    }
+
+    pub fn to_u64(&self) -> u64 {
+        match self {
+            Value::Nil => 0,
+            Value::Bool(bool) => *bool as u64,
+            Value::Number(num) => num.to_bits(),
+            Value::String(addr) => *addr as u64,
+            Value::FunctionPtr(addr) => *addr as u64,
+            Value::Object(addr) => *addr as u64,
+            Value::ExternObject(addr) => *addr as u64,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -117,6 +142,14 @@ impl ExternObject {
             drop: drop_impl::<T>,
             value,
         }
+    }
+
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    pub fn value_addr(&self) -> u64 {
+        self.value.addr().get() as u64
     }
 
     pub fn is<T: 'static>(&self) -> bool {
@@ -161,6 +194,9 @@ pub struct FunctionArgs<'r> {
     pub heap: &'r mut Heap,
     pub strings: &'r mut Interner,
     pub field_to_id_map: &'r mut ahash::HashMap<String, u32>,
+    /// Request a GC cycle. Note that if this is set, the stack must be
+    /// restored to its pre-call state (or bad things will happen).
+    pub needs_gc: &'r mut bool,
 }
 
 impl<'r> FunctionArgs<'r> {
@@ -177,7 +213,7 @@ impl<'r> FunctionArgs<'r> {
 }
 
 pub struct Runtime {
-    globals: Vec<Value>,
+    pub globals: Vec<Value>,
     global_name_map: HashMap<String, usize>,
     field_to_id_map: ahash::HashMap<String, u32>,
     functions: Vec<FunctionDef>,
@@ -185,6 +221,7 @@ pub struct Runtime {
     pub ip: usize,
     pub heap: Heap,
     pub interner: Interner,
+    pub gc_metrics: GcMetrics,
 }
 
 #[derive(Default)]
@@ -274,6 +311,10 @@ impl Runtime {
         })
     }
 
+    pub fn global_values(&self) -> impl Iterator<Item = Value> {
+        self.globals.iter().copied()
+    }
+
     pub fn field_ids(&self) -> impl Iterator<Item = (&str, u32)> {
         self.field_to_id_map
             .iter()
@@ -325,6 +366,7 @@ impl Runtime {
             stack: vec![],
             ip: 0,
             heap: Heap::new(20),
+            gc_metrics: GcMetrics::default(),
         }
     }
 }
@@ -352,6 +394,38 @@ impl Heap {
             next_free: 0,
             objects,
         }
+    }
+
+    pub fn sweep(&mut self, marked: &[bool]) -> usize {
+        assert!(marked.len() == self.objects.len());
+        let mut free_count = 0;
+
+        marked
+            .iter()
+            .enumerate()
+            .filter_map(|(addr, marked)| (!marked).then_some(addr))
+            .for_each(|addr| {
+                free_count += 1;
+                self.free(addr as u32);
+            });
+
+        free_count
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = HeapEntry<'_>> {
+        HeapIter {
+            heap: &self,
+            next_item: 0,
+            object_iter: None,
+        }
+    }
+
+    pub fn objects(&self) -> impl Iterator<Item = &HeapValue> {
+        self.objects.iter()
+    }
+
+    pub fn size(&self) -> usize {
+        self.objects.len()
     }
 
     /// Allocate a new object, returning it's "address" in the heap. This virtual
@@ -412,6 +486,35 @@ impl Heap {
         }
     }
 
+    pub fn try_take_extern(&mut self, addr: u32) -> Option<ExternObject> {
+        let addr = addr as usize;
+
+        if addr >= self.objects.len() {
+            panic!("bug: Invalid address");
+        }
+
+        let prev_free = self.next_free;
+        let obj = std::mem::replace(&mut self.objects[addr], HeapValue::Free { next: prev_free });
+        self.next_free = addr;
+
+        match obj {
+            HeapValue::Free { .. } => None,
+            HeapValue::Object(_) => None,
+            HeapValue::Extern(extern_object) => Some(extern_object),
+        }
+    }
+
+    pub fn insert<T: 'static>(&mut self, addr: u32, obj: T) {
+        let addr = addr as usize;
+        let obj = ExternObject::new(obj);
+
+        if let HeapValue::Free { next } = self.objects[addr] {
+            self.next_free = next;
+        }
+
+        self.objects[addr] = HeapValue::Extern(obj);
+    }
+
     /// Returns `None` if the object has been freed.
     pub fn get(&self, index: u32) -> Option<&Object> {
         match &self.objects[index as usize] {
@@ -458,6 +561,69 @@ impl Heap {
         let prev_free = self.next_free;
         self.objects[addr] = HeapValue::Free { next: prev_free };
         self.next_free = addr;
+    }
+}
+
+pub struct HeapIter<'h> {
+    heap: &'h Heap,
+    next_item: usize,
+    object_iter: Option<Iter<'h, u32, Value>>,
+}
+
+pub struct HeapEntry<'h> {
+    pub value: u64,
+    marker: PhantomData<&'h ()>,
+}
+
+impl<'h> Iterator for HeapIter<'h> {
+    type Item = HeapEntry<'h>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Check if we're currently iterating over the fields of an object.
+            if let Some(iter) = &mut self.object_iter {
+                // We are. Check if there are more fields.
+                if let Some((_key, value)) = iter.next() {
+                    // Yeah, there are. Return the next entry.
+                    return Some(HeapEntry {
+                        value: value.to_u64(),
+                        marker: Default::default(),
+                    });
+                } else {
+                    self.next_item += 1;
+                }
+            }
+
+            // Not currently iterating over an object. Check if there are more values in the
+            // heap.
+            if self.next_item >= self.heap.objects.len() {
+                // Nope. Iterator is finished.
+                return None;
+            }
+
+            // Grab the next entry.
+            let next_entry = &self.heap.objects[self.next_item];
+            match next_entry {
+                HeapValue::Free { next } => {
+                    self.next_item += 1;
+                    return Some(HeapEntry {
+                        value: *next as u64,
+                        marker: Default::default(),
+                    });
+                }
+                HeapValue::Object(object) => {
+                    self.object_iter = Some(object.data.iter());
+                    // Loop again, grabbing the first field in the object.
+                    continue;
+                }
+                HeapValue::Extern(extern_object) => {
+                    return Some(HeapEntry {
+                        value: extern_object.value.addr().get() as u64,
+                        marker: Default::default(),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -544,18 +710,22 @@ impl<'a> Vm<'a> {
             Instruction::Call { args } => {
                 let func_offset = self.vm.stack.len() - (args as usize + 1);
                 let func_ptr = self.vm.stack[func_offset];
+
                 if let Value::FunctionPtr(ptr) = func_ptr {
+                    let mut needs_gc = false;
                     let func_args = FunctionArgs {
                         stack: &mut self.vm.stack,
                         heap: &mut self.vm.heap,
                         strings: &mut self.vm.interner,
                         field_to_id_map: &mut self.vm.field_to_id_map,
+                        needs_gc: &mut needs_gc,
                     };
 
                     let def = &self.vm.functions[ptr as usize];
 
+                    // Make sure we have the correct number of arguments.
+                    // TODO: we probably shouldn't panic.
                     if def.args != args {
-                        // TODO: don't panic.
                         if def.args > args {
                             panic!(
                                 "missing arguments. Expected {} but only got {}",
@@ -566,10 +736,19 @@ impl<'a> Vm<'a> {
                         }
                     }
 
+                    // Call the function.
                     let res = (def.func)(func_args);
 
-                    self.vm.stack.truncate(func_offset);
+                    // Check if the function requested a garbage collection cycle.
+                    if needs_gc {
+                        // Roll back the instruction pointer so that this call instruction will
+                        // be executed again after the garbage collection cycle finishes.
+                        self.vm.ip -= 1;
+                        return ControlFlow::RequestGC;
+                    }
 
+                    // Call successfully completed. Remove arguments from stack and push the result.
+                    self.vm.stack.truncate(func_offset);
                     self.vm.stack.push(res);
                 } else {
                     todo!("expected function pointer");
